@@ -64,7 +64,12 @@ typedef struct osprd_info {
 
 	/* HINT: You may want to add additional fields to help
 	         in detecting deadlock. */
-
+	pid_t write_lock_thread_set;
+	pid_t read_lock_thread_set;
+	int write_locked;
+	pid_t write_proc;
+	int num_read_locked;
+	pid_t read_procs[OSPRD_MAJOR];
 	// The following elements are used internally; you don't need
 	// to understand them.
 	struct request_queue *queue;    // The device request queue.
@@ -121,19 +126,16 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// 'req->buffer' members, and the rq_data_dir() function.
 
 	// Your code here.
-	eprintk("Should process request...\n");
 	ptr = d->data + (req->sector * SECTOR_SIZE);
 	//Gets starting point of memory that we want to write to 
 	//Read case
 	if (rq_data_dir(req) == READ)
 	{
 		//memcpy(dst, src, size); //general form
-		eprintk("Entered reading \n");
 		memcpy(req->buffer, ptr, req->current_nr_sectors * SECTOR_SIZE);
 	}
 	else if (rq_data_dir(req) == WRITE)
 	{
-		eprintk("Entered writing \n");
 		memcpy(ptr, req->buffer, req->current_nr_sectors * SECTOR_SIZE);
 	}
 	else
@@ -216,7 +218,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 	(void) filp_writable, (void) d;
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
-
+	int my_ticket = 0;
 	if (cmd == OSPRDIOCACQUIRE) {
 
 		// EXERCISE: Lock the ramdisk.
@@ -255,8 +257,61 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// be protected by a spinlock; which ones?)
 
 		// Your code here (instead of the next two lines).
-		eprintk("Attempting to acquire\n");
-		r = -ENOTTY;
+		//Checking for simple deadlock
+		if (d->write_proc == current->pid)
+			return -EDEADLK;
+		int i;
+		for (i = 0; i < OSPRD_MAJOR; i++)
+		{
+			if (d->read_procs[i] == current->pid)
+				return -EDEADLK;
+		}
+		osp_spin_lock(&d->mutex);
+		my_ticket = d->ticket_head++;
+		osp_spin_unlock(&d->mutex);
+		
+		if (filp_writable) //may be inverted for incorrect logic
+		{
+
+			r = wait_event_interruptible(d->blockq, d->ticket_tail == my_ticket && d->write_lock_thread_set == NULL && d->read_lock_thread_set == NULL);
+			if (!r)
+			{
+				osp_spin_lock(&d->mutex);
+				d->write_lock_thread_set = current->pid;
+				d->write_locked = 1;
+				osp_spin_unlock(&d->mutex);
+			}
+			else //must be used for reading 
+			{
+				return -ERESTARTSYS;
+			}
+		
+		}
+		else //required for reading
+		{
+			r = wait_event_interruptible(d->blockq, d->ticket_tail >= my_ticket && d->write_locked == 0);
+			if (!r)
+			{
+				osp_spin_lock(&d->mutex);
+				d->num_read_locked++;
+				for (i = 0; i<OSPRD_MAJOR; i++)
+				{
+					if (d->read_procs[i] == -1)
+					{
+						d->read_procs[i] = current->pid;
+						break;
+					}
+				}
+				osp_spin_unlock(&d->mutex);
+			}
+			else
+			{
+				return -ERESTARTSYS;
+			}
+		}
+		d->ticket_tail++; //may be source of error 
+		filp->f_flags |= F_OSPRD_LOCKED;
+
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 
@@ -298,6 +353,11 @@ static void osprd_setup(osprd_info_t *d)
 	osp_spin_lock_init(&d->mutex);
 	d->ticket_head = d->ticket_tail = 0;
 	/* Add code here if you add fields to osprd_info_t. */
+	d->write_lock_thread_set = d->read_lock_thread_set = -1;
+	d->num_read_locked = 0;
+	d->write_proc = NULL;
+	d->write_locked = 0;
+	
 }
 
 
