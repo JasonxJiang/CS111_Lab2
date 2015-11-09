@@ -111,7 +111,7 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 		end_request(req, 0);
 		return;
 	}
-
+	void * ptr;
 	// EXERCISE: Perform the read or write request by copying data between
 	// our data array and the request's buffer.
 	// Hint: The 'struct request' argument tells you what kind of request
@@ -122,6 +122,26 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 
 	// Your code here.
 	eprintk("Should process request...\n");
+	ptr = d->data + (req->sector * SECTOR_SIZE);
+	//Gets starting point of memory that we want to write to 
+	//Read case
+	if (rq_data_dir(req) == READ)
+	{
+		//memcpy(dst, src, size); //general form
+		eprintk("Entered reading \n");
+		memcpy(req->buffer, ptr, req->current_nr_sectors * SECTOR_SIZE);
+	}
+	else if (rq_data_dir(req) == WRITE)
+	{
+		eprintk("Entered writing \n");
+		memcpy(ptr, req->buffer, req->current_nr_sectors * SECTOR_SIZE);
+	}
+	else
+	{
+		eprintk("Command not support! \n");
+		end_request(req, 0);
+		
+	}
 
 	end_request(req, 1);
 }
@@ -170,6 +190,19 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
  * osprd_ioctl(inode, filp, cmd, arg)
  *   Called to perform an ioctl on the named file.
  */
+
+/*
+/////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////
+
+WHERE THE TICKET IMPLEMENTATION IS PLACED
+
+/////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////
+*/
+
+//wait_event_interruptible(wait_queue_t, CONDITION);
+//wake_up_all(wait_queue_t q);
 int osprd_ioctl(struct inode *inode, struct file *filp,
 		unsigned int cmd, unsigned long arg)
 {
