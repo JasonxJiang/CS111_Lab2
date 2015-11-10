@@ -168,7 +168,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 	if (filp) {
 		osprd_info_t *d = file2osprd(filp);
 		int filp_writable = filp->f_mode & FMODE_WRITE;
-
+		int i;
 		// EXERCISE: If the user closes a ramdisk file that holds
 		// a lock, release the lock.  Also wake up blocked processes
 		// as appropriate.
@@ -177,6 +177,33 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 
 		// This line avoids compiler warnings; you may remove it.
 		(void) filp_writable, (void) d;
+		
+		//LOCK EVERYTHING DOWN FIRST
+		osp_spin_lock(&d->mutex);
+		if (filp->f_flags & F_OSPRD_LOCKED)
+		{
+			if (filp_writable)
+			{
+				d->write_locked = 0;
+				d->write_proc = -1;
+			}
+			else 
+			{
+				d->num_read_locked--;
+				for (i = 0; i<OSPRD_MAJOR; i++)
+				{
+					if (d->read_procs[i] == current->pid)
+					{
+						d->read_procs[i] = -1;
+						break;
+					}
+				}
+			}
+			
+		}
+		filp->f_flags ^= F_OSPRD_LOCKED;
+		osp_spin_unlock(&d->mutex);
+		wake_up_all(&d->blockq);
 
 	}
 
@@ -205,6 +232,14 @@ WHERE THE TICKET IMPLEMENTATION IS PLACED
 
 //wait_event_interruptible(wait_queue_t, CONDITION);
 //wake_up_all(wait_queue_t q);
+
+void reset_ticket_queues(int ticket, osprd_info_t * d)
+{
+	if (ticket == d->ticket_tail)
+		d->ticket_tail++;
+	else
+		d->ticket_head--;
+}
 int osprd_ioctl(struct inode *inode, struct file *filp,
 		unsigned int cmd, unsigned long arg)
 {
@@ -219,6 +254,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
 	int my_ticket = 0;
+	int i;
 	if (cmd == OSPRDIOCACQUIRE) {
 
 		// EXERCISE: Lock the ramdisk.
@@ -260,12 +296,14 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		//Checking for simple deadlock
 		if (d->write_proc == current->pid)
 			return -EDEADLK;
-		int i;
+		//int i;
 		for (i = 0; i < OSPRD_MAJOR; i++)
 		{
 			if (d->read_procs[i] == current->pid)
 				return -EDEADLK;
 		}
+
+		
 		osp_spin_lock(&d->mutex);
 		my_ticket = d->ticket_head++;
 		osp_spin_unlock(&d->mutex);
@@ -279,10 +317,11 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				osp_spin_lock(&d->mutex);
 				d->write_lock_thread_set = current->pid;
 				d->write_locked = 1;
-				osp_spin_unlock(&d->mutex);
+				//osp_spin_unlock(&d->mutex);
 			}
 			else //must be used for reading 
 			{
+				reset_ticket_queues(my_ticket, d);
 				return -ERESTARTSYS;
 			}
 		
@@ -302,16 +341,17 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 						break;
 					}
 				}
-				osp_spin_unlock(&d->mutex);
+				//osp_spin_unlock(&d->mutex);
 			}
 			else
 			{
+				reset_ticket_queues(my_ticket, d);
 				return -ERESTARTSYS;
 			}
 		}
 		d->ticket_tail++; //may be source of error 
 		filp->f_flags |= F_OSPRD_LOCKED;
-
+		//osp_spin_unlock(&d->mutex);
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 
@@ -323,8 +363,44 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Otherwise, if we can grant the lock request, return 0.
 
 		// Your code here (instead of the next two lines).
-		eprintk("Attempting to try acquire\n");
-		r = -ENOTTY;
+		if (d->write_proc == current->pid)
+			return -EBUSY;
+		int i;
+		if (filp_writable)
+		{
+			r = wait_event_interruptible(d->blockq, d->ticket_tail >= my_ticket && d->write_locked == 0);
+			if (d->num_read_locked > 0 || d->write_locked == 1)
+			{
+				return -EBUSY;
+			}
+			//Otherwise acquire the write lock!
+			osp_spin_lock(&d->mutex);
+			my_ticket = d->ticket_head++;
+			d->write_locked = 1;
+			d->write_lock_thread_set = current->pid;
+			//osp_spin_unlock(&d->mutex);
+		}
+		else //again the read case 
+		{
+			if (d->write_locked == 1)
+				return -EBUSY;
+			osp_spin_lock(&d->mutex);
+			d->num_read_locked++;
+			for (i = 0; i<OSPRD_MAJOR; i++)
+			{
+				if (d->read_procs[i] == -1)
+				{
+					d->read_procs[i] = current->pid;
+					break;
+				}
+			}
+			//osp_spin_unlock(&d->mutex);
+			
+		}
+		d->ticket_tail++;
+		d->ticket_head++;
+		filp->f_flags |= F_OSPRD_LOCKED;
+		osp_spin_unlock(&d->mutex);
 
 	} else if (cmd == OSPRDIOCRELEASE) {
 
@@ -334,9 +410,30 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Otherwise, clear the lock from filp->f_flags, wake up
 		// the wait queue, perform any additional accounting steps
 		// you need, and return 0.
-
+		if ((filp->f_flags & F_OSPRD_LOCKED) == 0)
+			return -EINVAL;
+		osp_spin_lock(&d->mutex);
+		if (filp_writable)
+		{
+			d->write_proc = -1;
+			d->write_locked = 0;
+		}
+		else
+		{
+			for (i = 0; i<OSPRD_MAJOR; i++)
+			{
+				if(d->read_procs[i] == current->pid)
+				{
+					d->read_procs[i] = -1;
+					break;
+				}
+			}
+		}
+		filp->f_flags ^= F_OSPRD_LOCKED;
+		osp_spin_unlock(&d->mutex);
+		wake_up_all(&d->blockq);
 		// Your code here (instead of the next line).
-		r = -ENOTTY;
+		r = 0;
 
 	} else
 		r = -ENOTTY; /* unknown command */
