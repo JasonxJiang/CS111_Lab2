@@ -292,7 +292,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// (Some of these operations are in a critical section and must
 		// be protected by a spinlock; which ones?)
 
-		// Your code here (instead of the next two lines).
+		
 		//Checking for simple deadlock
 		if (d->write_proc == current->pid)
 			return -EDEADLK;
@@ -302,28 +302,34 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			if (d->read_procs[i] == current->pid)
 				return -EDEADLK;
 		}
-
+		//if (d->
 		
 		osp_spin_lock(&d->mutex);
-		my_ticket = d->ticket_head++;
+		my_ticket = d->ticket_head;
+		d->ticket_head++;
 		osp_spin_unlock(&d->mutex);
 		
 		if (filp_writable) //may be inverted for incorrect logic
 		{
 
-			r = wait_event_interruptible(d->blockq, d->ticket_tail == my_ticket && d->write_lock_thread_set == NULL && d->read_lock_thread_set == NULL);
-			if (!r)
+			r = wait_event_interruptible(d->blockq, d->ticket_tail == my_ticket && d->write_locked == 0 && d->num_read_locked == 0);
+			if (r == -ERESTARTSYS)
 			{
+				//reset_ticket_queues(my_ticket, d);
+				if (my_ticket == d->ticket_tail)
+					d->ticket_tail++;
+				else
+					d->ticket_head--;
+				return -ERESTARTSYS;
+			}
+			//else //must be used for reading 
+			//{
+
 				osp_spin_lock(&d->mutex);
 				d->write_lock_thread_set = current->pid;
 				d->write_locked = 1;
 				//osp_spin_unlock(&d->mutex);
-			}
-			else //must be used for reading 
-			{
-				reset_ticket_queues(my_ticket, d);
-				return -ERESTARTSYS;
-			}
+			//}
 		
 		}
 		else //required for reading
@@ -345,13 +351,17 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			}
 			else
 			{
-				reset_ticket_queues(my_ticket, d);
+				if (my_ticket == d->ticket_tail)
+					d->ticket_tail++;
+				else
+					d->ticket_head--;
+				//reset_ticket_queues(my_ticket, d);
 				return -ERESTARTSYS;
 			}
 		}
 		d->ticket_tail++; //may be source of error 
 		filp->f_flags |= F_OSPRD_LOCKED;
-		//osp_spin_unlock(&d->mutex);
+		osp_spin_unlock(&d->mutex);
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 
