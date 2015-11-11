@@ -359,7 +359,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				return -ERESTARTSYS;
 			}
 		}
-		d->ticket_tail++; //may be source of error 
+		d->ticket_tail++; 
 		filp->f_flags |= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
 
