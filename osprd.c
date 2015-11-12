@@ -179,7 +179,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		(void) filp_writable, (void) d;
 		
 		//LOCK EVERYTHING DOWN FIRST
-		/*osp_spin_lock(&d->mutex);
+		osp_spin_lock(&d->mutex);
 		if (filp->f_flags & F_OSPRD_LOCKED)
 		{
 			filp->f_flags ^= F_OSPRD_LOCKED;
@@ -204,8 +204,8 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		}
 		//filp->f_flags ^= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
-		wake_up_all(&d->blockq);*/
-		osp_spin_lock(&d->mutex);//lock
+		wake_up_all(&d->blockq);
+		/*osp_spin_lock(&d->mutex);//lock
 		//if there wasn't a lock, do nothing...
 		if (filp->f_flags & F_OSPRD_LOCKED) 
 		{
@@ -222,7 +222,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		wake_up_all(&d->blockq);//wake up any blocked processes
 		osp_spin_unlock(&d->mutex);//unlock, done here
 
-
+*/
 	}
 
 	return 0;
@@ -341,7 +341,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				return -ERESTARTSYS;
 			}
 			osp_spin_lock(&d->mutex);
-			d->write_lock_thread_set = current->pid;
+			d->write_proc = current->pid;
 			d->write_locked = 1;
 			
 		
@@ -358,12 +358,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				//reset_ticket_queues(my_ticket, d);
 				return -ERESTARTSYS;
 			}
-			
-			/*else
-			{
-
-			}*/
-		
 			osp_spin_lock(&d->mutex);
 			d->num_read_locked++;
 			for (i = 0; i<OSPRD_MAJOR; i++)
@@ -403,7 +397,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			osp_spin_lock(&d->mutex);
 			//my_ticket = d->ticket_head++;
 			d->write_locked = 1;
-			d->write_lock_thread_set = current->pid;
+			d->write_proc = current->pid;
 		}
 		else //again the read case 
 		{
@@ -443,6 +437,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		}
 		else
 		{
+			d->num_read_locked--;
 			for (i = 0; i<OSPRD_MAJOR; i++)
 			{
 				if(d->read_procs[i] == current->pid)
