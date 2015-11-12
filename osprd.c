@@ -392,7 +392,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Your code here (instead of the next two lines).
 		//if (d->write_proc == current->pid)
 		//	return -EBUSY;
-		int i;
+		//int i;
 		if (filp_writable)
 		{
 			if (d->num_read_locked > 0 || d->write_locked == 1)
