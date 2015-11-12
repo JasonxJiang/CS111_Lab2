@@ -179,9 +179,10 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		(void) filp_writable, (void) d;
 		
 		//LOCK EVERYTHING DOWN FIRST
-		osp_spin_lock(&d->mutex);
+		/*osp_spin_lock(&d->mutex);
 		if (filp->f_flags & F_OSPRD_LOCKED)
 		{
+			filp->f_flags ^= F_OSPRD_LOCKED;
 			if (filp_writable)
 			{
 				d->write_locked = 0;
@@ -201,9 +202,26 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 			}
 			
 		}
-		filp->f_flags ^= F_OSPRD_LOCKED;
+		//filp->f_flags ^= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
-		wake_up_all(&d->blockq);
+		wake_up_all(&d->blockq);*/
+		osp_spin_lock(&d->mutex);//lock
+		//if there wasn't a lock, do nothing...
+		if (filp->f_flags & F_OSPRD_LOCKED) 
+		{
+			filp->f_flags ^= F_OSPRD_LOCKED;//set flag to unlocked
+			//resetting all osprd info values + my variables
+			d->write_locked = 0;
+			d->num_read_locked = 0;
+			//d->currentproc = -1;
+			int i;
+			for(i = 0; i < OSPRD_MAJOR; i++)//clear all readers
+				d->read_procs[i] = -1;
+			d->write_proc = -1; //clear writer
+		}
+		wake_up_all(&d->blockq);//wake up any blocked processes
+		osp_spin_unlock(&d->mutex);//unlock, done here
+
 
 	}
 
@@ -302,7 +320,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			if (d->read_procs[i] == current->pid)
 				return -EDEADLK;
 		}
-		//if (d->
+		//if (d->write_proc == current->pid)
 		
 		osp_spin_lock(&d->mutex);
 		my_ticket = d->ticket_head;
@@ -322,34 +340,16 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 					d->ticket_head--;
 				return -ERESTARTSYS;
 			}
-			//else //must be used for reading 
-			//{
-
-				osp_spin_lock(&d->mutex);
-				d->write_lock_thread_set = current->pid;
-				d->write_locked = 1;
-				//osp_spin_unlock(&d->mutex);
-			//}
+			osp_spin_lock(&d->mutex);
+			d->write_lock_thread_set = current->pid;
+			d->write_locked = 1;
+			
 		
 		}
 		else //required for reading
 		{
 			r = wait_event_interruptible(d->blockq, d->ticket_tail >= my_ticket && d->write_locked == 0);
-			if (!r)
-			{
-				osp_spin_lock(&d->mutex);
-				d->num_read_locked++;
-				for (i = 0; i<OSPRD_MAJOR; i++)
-				{
-					if (d->read_procs[i] == -1)
-					{
-						d->read_procs[i] = current->pid;
-						break;
-					}
-				}
-				//osp_spin_unlock(&d->mutex);
-			}
-			else
+			if (r == -ERESTARTSYS)
 			{
 				if (my_ticket == d->ticket_tail)
 					d->ticket_tail++;
@@ -357,6 +357,23 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 					d->ticket_head--;
 				//reset_ticket_queues(my_ticket, d);
 				return -ERESTARTSYS;
+			}
+			
+			/*else
+			{
+
+			}*/
+		
+			osp_spin_lock(&d->mutex);
+			d->num_read_locked++;
+			for (i = 0; i<OSPRD_MAJOR; i++)
+			{
+				if (d->read_procs[i] == -1)
+				{
+					d->read_procs[i] = current->pid;
+					break;
+				}
+				
 			}
 		}
 		d->ticket_tail++; 
@@ -373,22 +390,20 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Otherwise, if we can grant the lock request, return 0.
 
 		// Your code here (instead of the next two lines).
-		if (d->write_proc == current->pid)
-			return -EBUSY;
+		//if (d->write_proc == current->pid)
+		//	return -EBUSY;
 		int i;
 		if (filp_writable)
 		{
-			r = wait_event_interruptible(d->blockq, d->ticket_tail >= my_ticket && d->write_locked == 0);
 			if (d->num_read_locked > 0 || d->write_locked == 1)
 			{
 				return -EBUSY;
 			}
 			//Otherwise acquire the write lock!
 			osp_spin_lock(&d->mutex);
-			my_ticket = d->ticket_head++;
+			//my_ticket = d->ticket_head++;
 			d->write_locked = 1;
 			d->write_lock_thread_set = current->pid;
-			//osp_spin_unlock(&d->mutex);
 		}
 		else //again the read case 
 		{
@@ -404,8 +419,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 					break;
 				}
 			}
-			//osp_spin_unlock(&d->mutex);
-			
 		}
 		d->ticket_tail++;
 		d->ticket_head++;
@@ -442,7 +455,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		filp->f_flags ^= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
 		wake_up_all(&d->blockq);
-		// Your code here (instead of the next line).
 		r = 0;
 
 	} else
